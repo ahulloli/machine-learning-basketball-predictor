@@ -15,7 +15,7 @@ from datetime import date, datetime
 import pandas as pd
 from xgboost import XGBRegressor
 
-from .features import _team_clusters, load_stats
+from .features import LONG_BREAK_DAYS, REST_CAP, _team_clusters, load_stats
 from .train import MODEL_DIR
 
 logger = logging.getLogger(__name__)
@@ -120,13 +120,18 @@ def build_live_features(
         feat[f"{stat}_per_min_last5"] = round(v / m5, 4) if m5 and v is not None else None
 
     feat["games_played_so_far"] = int(len(prior))
-    feat["rest_days"] = (
-        float((on_ts - prior["game_date"].max()).days) if len(prior) else None
-    )
+    # Mirror the training transform: cap rest at REST_CAP and flag long breaks.
+    if len(prior):
+        raw_gap = float((on_ts - prior["game_date"].max()).days)
+        feat["rest_days"] = min(max(raw_gap, 0.0), float(REST_CAP))
+        feat["long_break"] = int(raw_gap > LONG_BREAK_DAYS)
+    else:
+        feat["rest_days"] = None
+        feat["long_break"] = None
 
-    # Opponent defensive rating (points allowed) from opponent's prior games.
+    # Opponent points-allowed proxy from the opponent's prior games.
     opp_id = abbr2id.get(opponent_abbr)
-    feat["opp_def_rating"], feat["opp_def_rating_last10"] = _opp_defense(opp_id, on_ts)
+    feat["opp_pts_allowed"], feat["opp_pts_allowed_last10"] = _opp_defense(opp_id, on_ts)
 
     # Player vs this exact opponent (per target stat).
     vs = prior[prior["opponent_abbr"] == opponent_abbr]

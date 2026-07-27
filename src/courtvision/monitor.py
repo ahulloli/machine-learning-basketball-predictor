@@ -20,6 +20,7 @@ from .db import SessionLocal, engine
 from .models import Base, Prediction
 from .predict import Prediction as Proj
 from .predict import predict_player, predict_slate
+from .train import WITHIN_TOLERANCE
 
 TARGET_COL = {"target_pts": "pts", "target_reb": "reb", "target_ast": "ast"}
 
@@ -124,7 +125,8 @@ class AccuracyReport:
     model_mae: float | None
     baseline_mae: float | None
     mae_improvement_pct: float | None
-    within_3: float | None  # share of predictions within 3 of actual
+    within_tolerance: float | None   # share within the target-specific tolerance
+    tolerance: float                 # the tolerance used (pts ±3, reb/ast ±2)
 
 
 def accuracy_report(target: str | None = None) -> list[AccuracyReport]:
@@ -147,7 +149,10 @@ def accuracy_report(target: str | None = None) -> list[AccuracyReport]:
             if base_mae
             else None
         )
-        within_3 = float((grp["abs_error"] <= 3).mean())
+        # Same target-specific tolerance used in offline evaluation, so the
+        # production monitor and the held-out report stay directly comparable.
+        tol = WITHIN_TOLERANCE.get(f"target_{tgt}", 3.0)
+        within = float((grp["abs_error"] <= tol).mean())
         reports.append(
             AccuracyReport(
                 target=tgt,
@@ -155,7 +160,8 @@ def accuracy_report(target: str | None = None) -> list[AccuracyReport]:
                 model_mae=round(model_mae, 3),
                 baseline_mae=round(base_mae, 3) if base_mae else None,
                 mae_improvement_pct=imp,
-                within_3=round(within_3, 3),
+                within_tolerance=round(within, 3),
+                tolerance=tol,
             )
         )
     return reports

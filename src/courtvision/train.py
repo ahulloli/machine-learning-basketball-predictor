@@ -31,11 +31,11 @@ NUMERIC_FEATURES = [
     "fga_last5", "stl_last5", "blk_last5", "tov_last5",
     "pts_last10", "reb_last10", "ast_last10", "min_last10",
     "pts_per_min_last5", "reb_per_min_last5", "ast_per_min_last5",
-    "opp_def_rating", "opp_def_rating_last10",
+    "opp_pts_allowed", "opp_pts_allowed_last10",
     "pts_vs_opp", "reb_vs_opp", "ast_vs_opp", "games_vs_opp",
     "pts_vs_opp_cluster", "reb_vs_opp_cluster", "ast_vs_opp_cluster",
     "games_vs_opp_cluster",
-    "rest_days", "games_played_so_far",
+    "rest_days", "long_break", "games_played_so_far",
 ]
 BOOL_FEATURES = ["home"]
 CLUSTER_FEATURE = "opp_cluster"
@@ -127,33 +127,36 @@ def time_split(df: pd.DataFrame, valid_frac: float = 0.2) -> tuple[pd.DataFrame,
 # Seasons used only to seed team play-style clusters, never trained/evaluated on.
 CONTEXT_SEASONS = ("2020-21",)
 
+# Whole-season holdouts. VALIDATION drives every modeling decision (features +
+# hyperparameters); TEST is a genuinely future season, touched exactly once.
+VALID_SEASON = "2024-25"
+TEST_SEASON = "2025-26"
+
 
 def three_way_split(
     df: pd.DataFrame,
-    test_season: str,
-    valid_frac_of_test_season: float = 0.5,
-) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.Timestamp]:
-    """Chronological TRAIN / VALIDATION / TEST split.
+    valid_season: str = VALID_SEASON,
+    test_season: str = TEST_SEASON,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Whole-season chronological TRAIN / VALIDATION / TEST split.
 
-    * TRAIN      = every modeled season BEFORE ``test_season``.
-    * VALIDATION = first ``valid_frac_of_test_season`` of ``test_season``
-                   (used for early-stopping / model selection).
-    * TEST       = the remainder of ``test_season`` (untouched until the end).
+    * TRAIN      = every modeled season BEFORE ``valid_season``.
+    * VALIDATION = the entire ``valid_season`` (feature + hyperparameter choices).
+    * TEST       = the entire ``test_season`` — a future season held out until
+                   the very end and scored only once.
 
     Context seasons (used only to seed clusters) are excluded entirely.
     """
     df = df[~df["season"].isin(CONTEXT_SEASONS)].copy()
 
-    train_df = df[df["season"] < test_season]
-    season_df = df[df["season"] == test_season].sort_values("game_date").reset_index(drop=True)
-    if season_df.empty:
+    train_df = df[df["season"] < valid_season]
+    valid_df = df[df["season"] == valid_season]
+    test_df = df[df["season"] == test_season]
+    if valid_df.empty:
+        raise ValueError(f"No rows for valid_season={valid_season}")
+    if test_df.empty:
         raise ValueError(f"No rows for test_season={test_season}")
-
-    cut = int(len(season_df) * valid_frac_of_test_season)
-    split_date = season_df.loc[cut, "game_date"]
-    valid_df = season_df[season_df["game_date"] < split_date]
-    test_df = season_df[season_df["game_date"] >= split_date]
-    return train_df, valid_df, test_df, split_date
+    return train_df, valid_df, test_df
 
 
 def train_target(
@@ -162,7 +165,8 @@ def train_target(
     baseline_col: str = "pts_last5",
     valid_frac: float = 0.2,
 ) -> tuple[XGBRegressor, list[str], TrainResult]:
-    df = df.dropna(subset=["pts_last5", target]).copy()
+    # Context seasons seed clusters only; never train the deployable model on them.
+    df = df[~df["season"].isin(CONTEXT_SEASONS)].dropna(subset=["pts_last5", target]).copy()
     train_df, valid_df, split_date = time_split(df, valid_frac)
 
     X_train, y_train = prepare_xy(train_df, target)
@@ -172,20 +176,29 @@ def train_target(
     X_valid = X_valid.reindex(columns=X_train.columns, fill_value=0)
     feature_names = list(X_train.columns)
 
-    # Select hyperparameters on the validation split, then refit the final
-    # deployable model on train+validation with the chosen configuration.
-    best_params, best_mae, best_model = None, float("inf"), None
+    # Select hyperparameters on the validation split (train only).
+    best_params, best_mae = None, float("inf")
     for params in PARAM_GRID:
         m = _xgb(params)
         m.fit(X_train, y_train, verbose=False)
         v_mae = mean_absolute_error(y_valid, m.predict(X_valid))
         if v_mae < best_mae:
-            best_params, best_mae, best_model = params, float(v_mae), m
+            best_params, best_mae = params, float(v_mae)
 
-    model = best_model
-    pred = model.predict(X_valid)
-    model_mae = mean_absolute_error(y_valid, pred)
-    model_rmse = float(np.sqrt(mean_squared_error(y_valid, pred)))
+    # Validation MAE of the chosen configuration (reported below), measured
+    # before the final refit so it reflects genuine held-out performance.
+    model_mae = round(best_mae, 3)
+    model_rmse = float(np.sqrt(mean_squared_error(
+        y_valid, _xgb(best_params).fit(X_train, y_train).predict(X_valid)
+    )))
+
+    # Refit the FINAL deployable model on train+validation with the chosen
+    # configuration, so it learns from all available history before deployment.
+    X_full = pd.concat([X_train, X_valid.reindex(columns=X_train.columns, fill_value=0)],
+                       ignore_index=True)
+    y_full = pd.concat([y_train, y_valid], ignore_index=True)
+    model = _xgb(best_params)
+    model.fit(X_full, y_full, verbose=False)
 
     # Naive baseline: predict the last-5 rolling average.
     base_pred = valid_df[baseline_col].reindex(valid_df.index)
@@ -252,18 +265,18 @@ def _mae_rmse(y_true, y_pred) -> tuple[float, float]:
 def evaluate_target(
     df: pd.DataFrame,
     target: str,
-    test_season: str,
     baseline_col: str,
+    valid_season: str = VALID_SEASON,
+    test_season: str = TEST_SEASON,
 ) -> EvalResult:
-    """Train / validate / test with a strictly chronological split.
+    """Whole-season train / validation / test evaluation.
 
-    The TEST set (second half of ``test_season``) is never used for fitting or
-    model selection — it is scored exactly once, at the end, to give a credible
-    estimate of real-world performance.
+    Model selection (hyperparameters) happens only on ``valid_season``. The
+    ``test_season`` is a genuinely future season, scored exactly once at the
+    end, so the reported metrics are an honest out-of-sample estimate.
     """
     df = df.dropna(subset=["pts_last5", target]).copy()
-    train_df, valid_df, test_df, valid_split = three_way_split(df, test_season)
-    test_split = test_df["game_date"].min()
+    train_df, valid_df, test_df = three_way_split(df, valid_season, test_season)
 
     X_train, y_train = prepare_xy(train_df, target)
     X_valid, y_valid = prepare_xy(valid_df, target)
@@ -302,8 +315,8 @@ def evaluate_target(
         n_train=len(X_train),
         n_valid=len(X_valid),
         n_test=len(X_test),
-        valid_split_date=str(valid_split.date()),
-        test_split_date=str(test_split.date()),
+        valid_split_date=valid_season,
+        test_split_date=test_season,
         test_model_mae=round(t_mmae, 3),
         test_model_rmse=round(t_mrmse, 3),
         test_baseline_mae=round(t_bmae, 3),

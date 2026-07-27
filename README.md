@@ -44,9 +44,9 @@ Saved Models ─────► Prediction Engine
 ## Held-out results
 
 Strict chronological **train / validation / test** split. Models train on
-2021-22 → 2023-24; XGBoost hyperparameters are selected on the first half of
-2024-25 (**validation**); the model is then scored **exactly once** on the
-untouched second half of 2024-25 (~13k player-games, **test**). 2020-21 is
+2021-22 → 2023-24; XGBoost hyperparameters are selected on the whole
+2024-25 season (**validation**); the final model is then scored **exactly once**
+on the untouched 2025-26 season (~26k player-games, **test**). 2020-21 is
 ingested only to seed team play-style clusters and is never modeled on.
 
 MAE is the headline metric. "Within" uses a target-specific tolerance
@@ -54,11 +54,11 @@ MAE is the headline metric. "Within" uses a target-specific tolerance
 
 | Target   | Test MAE | Naive last-5 MAE | Improvement | Within |
 |----------|---------:|-----------------:|------------:|-------:|
-| Points   |    4.690 |            4.891 |      +4.11% | 40.8% (±3) |
-| Rebounds |    1.976 |            2.075 |      +4.74% | 61.6% (±2) |
-| Assists  |    1.369 |            1.416 |      +3.32% | 78.6% (±2) |
+| Points   |    4.610 |            4.802 |      +3.99% | 41.1% (±3) |
+| Rebounds |    1.917 |            1.992 |      +3.74% | 62.3% (±2) |
+| Assists  |    1.372 |            1.401 |      +2.08% | 78.3% (±2) |
 
-Reproduce: `python scripts/evaluate.py 2024-25`
+Reproduce: `python scripts/evaluate.py`
 
 ## What's implemented
 
@@ -74,13 +74,15 @@ Reproduce: `python scripts/evaluate.py 2024-25`
   cluster ids mean the same play-style every year and no current-season info leaks.
 - **XGBoost models** for points / rebounds / assists, each compared against a
   naive last-5 baseline.
-- **Train / validation / test methodology** — split strictly by date;
-  hyperparameters are chosen on validation and the test set is scored once.
+- **Train / validation / test methodology** — split by full season
+  (train=2021-24, validation=2024-25, test=2025-26); hyperparameters are
+  chosen on validation and the untouched test set is scored once.
 - **Daily prediction pipeline** — fetches a date's schedule (`ScoreboardV2`),
   reconstructs each player's features from games *before* that date, and outputs
   projections for the slate.
 - **Prediction logging + monitoring** — projections are stored, later reconciled
-  against real box scores, and summarized (model MAE, baseline MAE, % within 3).
+  against real box scores, and summarized (model MAE, baseline MAE, % within
+  target-specific tolerance).
 
 ## Setup
 

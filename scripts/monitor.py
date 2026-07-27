@@ -66,11 +66,12 @@ def main() -> None:
             return
         print("\nCourtVision model-monitoring report")
         print("-" * 64)
-        print(f"{'target':8}{'n':>7}{'model_MAE':>12}{'base_MAE':>11}{'improve%':>11}{'within3':>9}")
+        print(f"{'target':8}{'n':>7}{'model_MAE':>12}{'base_MAE':>11}{'improve%':>11}{'within':>12}")
         for r in reports:
             imp = "n/a" if r.mae_improvement_pct is None else f"{r.mae_improvement_pct}"
             base = "n/a" if r.baseline_mae is None else f"{r.baseline_mae}"
-            print(f"{r.target:8}{r.n:>7}{r.model_mae:>12}{base:>11}{imp:>11}{r.within_3:>9}")
+            w = f"{r.within_tolerance:.3f}(±{r.tolerance:g})"
+            print(f"{r.target:8}{r.n:>7}{r.model_mae:>12}{base:>11}{imp:>11}{w:>12}")
         print("-" * 64)
 
 

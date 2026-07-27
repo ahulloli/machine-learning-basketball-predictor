@@ -111,6 +111,7 @@ class PlayerGameFeature(Base):
     opponent_abbr: Mapped[str | None] = mapped_column(String(8), nullable=True)
     home: Mapped[bool] = mapped_column(Boolean, default=False)
     rest_days: Mapped[float | None] = mapped_column(Float, nullable=True)
+    long_break: Mapped[int | None] = mapped_column(Integer, nullable=True)
     games_played_so_far: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     # Rolling last-5 features (from previous games only)
@@ -134,9 +135,10 @@ class PlayerGameFeature(Base):
     reb_per_min_last5: Mapped[float | None] = mapped_column(Float, nullable=True)
     ast_per_min_last5: Mapped[float | None] = mapped_column(Float, nullable=True)
 
-    # Opponent defensive strength (points the opponent allows, prior games only)
-    opp_def_rating: Mapped[float | None] = mapped_column(Float, nullable=True)
-    opp_def_rating_last10: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # Opponent defense proxy (points the opponent allows per game, prior games
+    # only). Raw points allowed, not possession-adjusted — hence the honest name.
+    opp_pts_allowed: Mapped[float | None] = mapped_column(Float, nullable=True)
+    opp_pts_allowed_last10: Mapped[float | None] = mapped_column(Float, nullable=True)
 
     # Player-vs-opponent history (prior meetings only), per target stat
     pts_vs_opp: Mapped[float | None] = mapped_column(Float, nullable=True)

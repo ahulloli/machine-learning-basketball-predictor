@@ -20,20 +20,19 @@ BASELINE = {"target_pts": "pts_last5", "target_reb": "reb_last5", "target_ast": 
 
 
 def main() -> None:
-    test_season = sys.argv[1] if len(sys.argv) > 1 else "2024-25"
-    targets = [sys.argv[2]] if len(sys.argv) > 2 else list(BASELINE)
+    targets = [sys.argv[1]] if len(sys.argv) > 1 else list(BASELINE)
 
     df = load_features()
     if df.empty:
         raise SystemExit("No features. Run scripts/build_features.py first.")
 
-    results = [evaluate_target(df, t, test_season, BASELINE[t]) for t in targets]
+    results = [evaluate_target(df, t, BASELINE[t]) for t in targets]
 
     r0 = results[0]
     print("\n" + "=" * 74)
-    print(f"  CourtVision held-out evaluation — TEST season {test_season}")
+    print(f"  CourtVision held-out evaluation — TEST season {r0.test_season}")
     print(f"  train={r0.n_train:,}  valid={r0.n_valid:,}  test={r0.n_test:,}")
-    print(f"  validation starts {r0.valid_split_date}   TEST starts {r0.test_split_date}")
+    print(f"  validation season {r0.valid_split_date}   TEST season {r0.test_split_date}")
     print("=" * 74)
     print(f"{'target':8}{'test_MAE':>11}{'base_MAE':>11}{'improve%':>11}"
           f"{'test_RMSE':>12}{'within':>12}")

@@ -20,13 +20,15 @@ WINDOW = 5
 LONG_WINDOW = 10
 LONG_COLS = ["pts", "reb", "ast", "min"]
 N_CLUSTERS = 6
+REST_CAP = 7           # cap rest so an offseason gap != in-season rest
+LONG_BREAK_DAYS = 14   # gaps beyond this flag a season opener / long absence
 
 
 def load_stats(season: str | None = None) -> pd.DataFrame:
     query = """
         SELECT s.game_id, s.player_id, p.name AS player_name, s.season,
                s.game_date, s.team_id, s.opponent_abbr, s.home,
-               s.pts, s.reb, s.ast, s.min, s.fg3m, s.fg3a, s.fga, s.fta,
+               s.pts, s.reb, s.oreb, s.ast, s.min, s.fg3m, s.fg3a, s.fga, s.fta,
                s.stl, s.blk, s.tov
         FROM player_game_stats s
         JOIN players p ON p.player_id = s.player_id
@@ -42,12 +44,15 @@ def load_stats(season: str | None = None) -> pd.DataFrame:
 
 
 def _opponent_defense(df: pd.DataFrame) -> pd.DataFrame:
-    """Leakage-safe opponent defensive rating (points a team allows).
+    """Leakage-safe opponent points-allowed (a simple defensive proxy).
 
     Aggregate box scores to team-game totals, derive points allowed (the
     opposing team's total), then for each team compute the mean points allowed
     over PRIOR games only (``shift(1)``). Returns, per (game_id, team_id), the
-    defensive rating that team carries INTO that game.
+    points-allowed the opponent team carries INTO that game.
+
+    NOTE: this is raw points allowed per game, NOT possession-adjusted
+    defensive rating, hence the honest ``opp_pts_allowed`` naming.
     """
     tg = df.groupby(["game_id", "team_id"], as_index=False).agg(
         team_pts=("pts", "sum"), game_date=("game_date", "first")
@@ -59,15 +64,15 @@ def _opponent_defense(df: pd.DataFrame) -> pd.DataFrame:
 
     merged = merged.sort_values(["team_id", "game_date", "game_id"])
     g = merged.groupby("team_id", sort=False)["pts_allowed"]
-    merged["opp_def_rating"] = g.transform(
+    merged["opp_pts_allowed"] = g.transform(
         lambda s: s.shift(1).expanding(min_periods=1).mean()
     ).round(3)
-    merged["opp_def_rating_last10"] = g.transform(
+    merged["opp_pts_allowed_last10"] = g.transform(
         lambda s: s.shift(1).rolling(LONG_WINDOW, min_periods=1).mean()
     ).round(3)
     return merged[[
         "game_id", "team_id", "team_id_opp",
-        "opp_def_rating", "opp_def_rating_last10",
+        "opp_pts_allowed", "opp_pts_allowed_last10",
     ]]
 
 
@@ -100,13 +105,14 @@ def _team_clusters(df: pd.DataFrame) -> dict[tuple[str, int], int]:
     tg = df.groupby(["season", "game_id", "team_id"], as_index=False).agg(
         pts=("pts", "sum"), fga=("fga", "sum"), fg3a=("fg3a", "sum"),
         fta=("fta", "sum"), ast=("ast", "sum"), reb=("reb", "sum"),
-        tov=("tov", "sum"),
+        oreb=("oreb", "sum"), tov=("tov", "sum"),
     )
     # Points allowed = opponent's total within the same game.
     pair = tg.merge(tg[["game_id", "team_id", "pts"]], on="game_id", suffixes=("", "_opp"))
     pair = pair[pair["team_id"] != pair["team_id_opp"]]
     pair["pts_allowed"] = pair["pts_opp"]
-    pair["poss"] = pair["fga"] + 0.44 * pair["fta"] + pair["tov"]
+    # Standard possession estimate (offensive rebounds extend a possession).
+    pair["poss"] = pair["fga"] - pair["oreb"] + pair["tov"] + 0.44 * pair["fta"]
     pair["fg3_rate"] = (pair["fg3a"] / pair["fga"]).fillna(0)
 
     profile = pair.groupby(["season", "team_id"], as_index=False).agg(
@@ -181,10 +187,16 @@ def build_features(season: str | None = None) -> pd.DataFrame:
     out["reb_per_min_last5"] = (out["reb_last5"] / min5).round(4)
     out["ast_per_min_last5"] = (out["ast_last5"] / min5).round(4)
 
-    out["rest_days"] = grp["game_date"].transform(lambda s: s.diff().dt.days)
+    # Days since the player's previous game. Raw gaps can be ~190 days across an
+    # offseason, which is a different concept from a 1-3 day in-season rest, so
+    # cap at a week and add an explicit long-break flag (season opener / return
+    # from injury). The SAME transform is mirrored in predict.py.
+    raw_gap = grp["game_date"].transform(lambda s: s.diff().dt.days)
+    out["rest_days"] = raw_gap.clip(lower=0, upper=REST_CAP)
+    out["long_break"] = (raw_gap > LONG_BREAK_DAYS).astype("Int64")
     out["games_played_so_far"] = grp.cumcount()
 
-    # Opponent defensive strength: join the OPPONENT team's def rating.
+    # Opponent defense proxy: join the OPPONENT team's prior points-allowed.
     defense = _opponent_defense(df)
     # 1) attach each player-game's opponent team id
     key = df[["game_id", "team_id"]].reset_index(drop=True)
@@ -192,13 +204,13 @@ def build_features(season: str | None = None) -> pd.DataFrame:
         defense[["game_id", "team_id", "team_id_opp"]],
         on=["game_id", "team_id"], how="left",
     )
-    # 2) look up that opponent team's defensive rating going into the game
+    # 2) look up that opponent team's points-allowed going into the game
     opp_def = defense[[
-        "game_id", "team_id", "opp_def_rating", "opp_def_rating_last10",
+        "game_id", "team_id", "opp_pts_allowed", "opp_pts_allowed_last10",
     ]].rename(columns={"team_id": "team_id_opp"})
     key = key.merge(opp_def, on=["game_id", "team_id_opp"], how="left")
-    out["opp_def_rating"] = key["opp_def_rating"].values
-    out["opp_def_rating_last10"] = key["opp_def_rating_last10"].values
+    out["opp_pts_allowed"] = key["opp_pts_allowed"].values
+    out["opp_pts_allowed_last10"] = key["opp_pts_allowed_last10"].values
 
     # Attach opponent team id + opponent play-style cluster onto df rows.
     df = df.copy()
