@@ -1,0 +1,11 @@
+# CourtVision — NBA player-game prediction pipeline
+# Core data ingestion + storage
+nba_api>=1.5.2
+pandas>=2.2.0
+SQLAlchemy>=2.0.30
+psycopg2-binary>=2.9.9
+python-dotenv>=1.0.1
+
+# Modeling (used in later milestones)
+scikit-learn>=1.5.0
+xgboost>=2.1.0

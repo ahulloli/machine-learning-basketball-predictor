@@ -1,0 +1,16 @@
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+.env
+.DS_Store
+data/*.csv
+
+# Trained model artifacts (regenerated via scripts/train_model.py)
+models/*.json
+
+# Editor / OS
+.idea/
+.vscode/
+*.log
