@@ -44,15 +44,19 @@ Saved Models ─────► Prediction Engine
 ## Held-out results
 
 Strict chronological **train / validation / test** split. Models train on
-2021-22 → 2023-24, use the first half of 2024-25 for model selection, and are
-scored **once** on the untouched second half of 2024-25 (~13k player-games).
-2020-21 is ingested only to seed team play-style clusters and is never modeled on.
+2021-22 → 2023-24; XGBoost hyperparameters are selected on the first half of
+2024-25 (**validation**); the model is then scored **exactly once** on the
+untouched second half of 2024-25 (~13k player-games, **test**). 2020-21 is
+ingested only to seed team play-style clusters and is never modeled on.
 
-| Target   | Test MAE | Naive last-5 MAE | Improvement | Within ±3 |
-|----------|---------:|-----------------:|------------:|----------:|
-| Points   |    4.714 |            4.891 |      +3.61% |     40.6% |
-| Rebounds |    2.003 |            2.075 |      +3.46% |     79.1% |
-| Assists  |    1.384 |            1.416 |      +2.23% |     90.3% |
+MAE is the headline metric. "Within" uses a target-specific tolerance
+(points ±3, rebounds/assists ±2) since a fixed ±3 is not comparable across stats.
+
+| Target   | Test MAE | Naive last-5 MAE | Improvement | Within |
+|----------|---------:|-----------------:|------------:|-------:|
+| Points   |    4.690 |            4.891 |      +4.11% | 40.8% (±3) |
+| Rebounds |    1.976 |            2.075 |      +4.74% | 61.6% (±2) |
+| Assists  |    1.369 |            1.416 |      +3.32% | 78.6% (±2) |
 
 Reproduce: `python scripts/evaluate.py 2024-25`
 
@@ -61,14 +65,17 @@ Reproduce: `python scripts/evaluate.py 2024-25`
 - **Real data ingestion** — one `LeagueGameLog` call per season pulls every
   player-game box score (points, rebounds, assists, minutes, shooting, etc.)
   into PostgreSQL. Idempotent upserts, so re-running mid-season adds new games.
-- **Leakage-safe feature engineering** — rolling last-5 / last-10 form, points
-  per minute, rest days, opponent defensive rating, player-vs-opponent history,
-  and **team play-style clustering** (KMeans on the *previous* season's team
-  profiles) with player-vs-similar-team scoring.
+- **Leakage-safe feature engineering** — rolling last-5 / last-10 form and
+  per-minute efficiency, rest days, opponent defensive rating, and
+  **target-specific** player-vs-opponent and player-vs-similar-team history for
+  each of points / rebounds / assists.
+- **Stable, leakage-free team clustering** — one KMeans (fit once on the context
+  season) assigns each team its cluster from the *previous* season's profile, so
+  cluster ids mean the same play-style every year and no current-season info leaks.
 - **XGBoost models** for points / rebounds / assists, each compared against a
   naive last-5 baseline.
-- **Time-based evaluation** — train / validation / test are split by date, never
-  shuffled, so the model is judged only on future games.
+- **Train / validation / test methodology** — split strictly by date;
+  hyperparameters are chosen on validation and the test set is scored once.
 - **Daily prediction pipeline** — fetches a date's schedule (`ScoreboardV2`),
   reconstructs each player's features from games *before* that date, and outputs
   projections for the slate.

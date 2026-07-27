@@ -30,23 +30,25 @@ def main() -> None:
     results = [evaluate_target(df, t, test_season, BASELINE[t]) for t in targets]
 
     r0 = results[0]
-    print("\n" + "=" * 70)
+    print("\n" + "=" * 74)
     print(f"  CourtVision held-out evaluation — TEST season {test_season}")
     print(f"  train={r0.n_train:,}  valid={r0.n_valid:,}  test={r0.n_test:,}")
     print(f"  validation starts {r0.valid_split_date}   TEST starts {r0.test_split_date}")
-    print("=" * 70)
-    print(f"{'target':8}{'test_MAE':>11}{'base_MAE':>11}{'improve%':>11}{'test_RMSE':>12}{'within3':>10}")
-    print("-" * 70)
+    print("=" * 74)
+    print(f"{'target':8}{'test_MAE':>11}{'base_MAE':>11}{'improve%':>11}"
+          f"{'test_RMSE':>12}{'within':>12}")
+    print("-" * 74)
     for r in results:
+        w = f"{r.test_within_threshold:.3f}(±{r.within_threshold:g})"
         print(f"{r.target.replace('target_',''):8}{r.test_model_mae:>11}"
               f"{r.test_baseline_mae:>11}{r.test_mae_improvement_pct:>11}"
-              f"{r.test_model_rmse:>12}{r.test_within_3:>10}")
-    print("-" * 70)
-    print("(validation MAE shown for reference — used for model selection only)")
+              f"{r.test_model_rmse:>12}{w:>12}")
+    print("-" * 74)
+    print("Hyperparameters selected on VALIDATION (test never used for selection):")
     for r in results:
         print(f"  {r.target.replace('target_',''):5}  valid_model={r.valid_model_mae}  "
-              f"valid_base={r.valid_baseline_mae}")
-    print("=" * 70)
+              f"valid_base={r.valid_baseline_mae}  best={r.best_params}")
+    print("=" * 74)
 
 
 if __name__ == "__main__":

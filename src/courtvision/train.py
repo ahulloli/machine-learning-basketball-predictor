@@ -30,14 +30,19 @@ NUMERIC_FEATURES = [
     "pts_last5", "reb_last5", "ast_last5", "min_last5", "fg3m_last5",
     "fga_last5", "stl_last5", "blk_last5", "tov_last5",
     "pts_last10", "reb_last10", "ast_last10", "min_last10",
-    "pts_per_min_last5",
+    "pts_per_min_last5", "reb_per_min_last5", "ast_per_min_last5",
     "opp_def_rating", "opp_def_rating_last10",
-    "pts_vs_opp", "games_vs_opp",
-    "pts_vs_opp_cluster", "games_vs_opp_cluster",
+    "pts_vs_opp", "reb_vs_opp", "ast_vs_opp", "games_vs_opp",
+    "pts_vs_opp_cluster", "reb_vs_opp_cluster", "ast_vs_opp_cluster",
+    "games_vs_opp_cluster",
     "rest_days", "games_played_so_far",
 ]
 BOOL_FEATURES = ["home"]
 CLUSTER_FEATURE = "opp_cluster"
+
+# Target-specific "close enough" tolerance. Points are higher-scale/variance,
+# so ±3 there is comparable to ±2 for rebounds/assists. MAE stays the headline.
+WITHIN_TOLERANCE = {"target_pts": 3.0, "target_reb": 2.0, "target_ast": 2.0}
 
 
 @dataclass
@@ -69,10 +74,12 @@ class EvalResult:
     test_baseline_mae: float
     test_baseline_rmse: float
     test_mae_improvement_pct: float
-    test_within_3: float
-    # For reference: validation metrics
+    within_threshold: float          # target-specific tolerance used below
+    test_within_threshold: float     # share of test preds within that tolerance
+    # For reference: validation metrics + selected hyperparameters
     valid_model_mae: float
     valid_baseline_mae: float
+    best_params: dict
 
 
 def load_features(season: str | None = None) -> pd.DataFrame:
@@ -94,8 +101,9 @@ def prepare_xy(df: pd.DataFrame, target: str) -> tuple[pd.DataFrame, pd.Series]:
 
     X = df[NUMERIC_FEATURES + BOOL_FEATURES].copy()
     X["home"] = X["home"].astype(int)
-    X["rest_days"] = X["rest_days"].fillna(df["rest_days"].median())
-    # Remaining NaNs (early-window features) -> let XGBoost handle as missing.
+    # No imputation: NaNs (early-window / first-game rest_days) are passed
+    # through and handled natively by XGBoost as "missing". Filling with a
+    # split-wide median would leak the split's distribution into each row.
     X = X.apply(pd.to_numeric, errors="coerce").reset_index(drop=True)
 
     # Low-cardinality opponent play-style cluster -> one-hot (unlike the noisy
@@ -164,20 +172,17 @@ def train_target(
     X_valid = X_valid.reindex(columns=X_train.columns, fill_value=0)
     feature_names = list(X_train.columns)
 
-    model = XGBRegressor(
-        n_estimators=400,
-        max_depth=5,
-        learning_rate=0.05,
-        subsample=0.8,
-        colsample_bytree=0.8,
-        min_child_weight=5,
-        reg_lambda=1.0,
-        objective="reg:squarederror",
-        n_jobs=-1,
-        random_state=42,
-    )
-    model.fit(X_train, y_train, eval_set=[(X_valid, y_valid)], verbose=False)
+    # Select hyperparameters on the validation split, then refit the final
+    # deployable model on train+validation with the chosen configuration.
+    best_params, best_mae, best_model = None, float("inf"), None
+    for params in PARAM_GRID:
+        m = _xgb(params)
+        m.fit(X_train, y_train, verbose=False)
+        v_mae = mean_absolute_error(y_valid, m.predict(X_valid))
+        if v_mae < best_mae:
+            best_params, best_mae, best_model = params, float(v_mae), m
 
+    model = best_model
     pred = model.predict(X_valid)
     model_mae = mean_absolute_error(y_valid, pred)
     model_rmse = float(np.sqrt(mean_squared_error(y_valid, pred)))
@@ -207,19 +212,34 @@ def train_target(
     return model, feature_names, result
 
 
-def _xgb() -> XGBRegressor:
-    return XGBRegressor(
-        n_estimators=400,
-        max_depth=5,
-        learning_rate=0.05,
-        subsample=0.8,
-        colsample_bytree=0.8,
-        min_child_weight=5,
-        reg_lambda=1.0,
-        objective="reg:squarederror",
-        n_jobs=-1,
-        random_state=42,
-    )
+_BASE_PARAMS = dict(
+    subsample=0.8,
+    colsample_bytree=0.8,
+    reg_lambda=1.0,
+    objective="reg:squarederror",
+    n_jobs=-1,
+    random_state=42,
+)
+
+# Small grid searched on the VALIDATION set only (never the test set).
+# n_estimators is held at 600 (paired with the learning-rate sweep to vary
+# effective capacity) to keep the search tractable.
+PARAM_GRID = [
+    {"max_depth": d, "learning_rate": lr, "n_estimators": 600, "min_child_weight": mcw}
+    for d in (3, 4, 5, 6)
+    for lr in (0.03, 0.05, 0.1)
+    for mcw in (3, 5, 10)
+]
+
+
+def _xgb(params: dict | None = None) -> XGBRegressor:
+    cfg = dict(_BASE_PARAMS)
+    cfg.update(params or {})
+    cfg.setdefault("n_estimators", 400)
+    cfg.setdefault("max_depth", 5)
+    cfg.setdefault("learning_rate", 0.05)
+    cfg.setdefault("min_child_weight", 5)
+    return XGBRegressor(**cfg)
 
 
 def _mae_rmse(y_true, y_pred) -> tuple[float, float]:
@@ -252,19 +272,29 @@ def evaluate_target(
     X_valid = X_valid.reindex(columns=feature_names, fill_value=0)
     X_test = X_test.reindex(columns=feature_names, fill_value=0)
 
-    model = _xgb()
-    # Validation set drives early stopping / model selection only.
-    model.fit(X_train, y_train, eval_set=[(X_valid, y_valid)], verbose=False)
+    # --- Model selection: search the grid, pick the lowest VALIDATION MAE. ---
+    best_params, best_valid_mae, best_model = None, float("inf"), None
+    for params in PARAM_GRID:
+        m = _xgb(params)
+        m.fit(X_train, y_train, verbose=False)
+        v_mae = mean_absolute_error(y_valid, m.predict(X_valid))
+        if v_mae < best_valid_mae:
+            best_params, best_valid_mae, best_model = params, float(v_mae), m
 
-    def _metrics(frame, X, y):
-        m_mae, m_rmse = _mae_rmse(y, model.predict(X))
+    model = best_model  # selected purely on validation; test still untouched
+
+    def _baseline(frame):
         base = frame.dropna(subset=[baseline_col, target])
-        b_mae, b_rmse = _mae_rmse(base[target], base[baseline_col])
-        return m_mae, m_rmse, b_mae, b_rmse
+        return _mae_rmse(base[target], base[baseline_col])
 
-    v_mmae, _, v_bmae, _ = _metrics(valid_df, X_valid, y_valid)
-    t_mmae, t_mrmse, t_bmae, t_brmse = _metrics(test_df, X_test, y_test)
-    within_3 = float((np.abs(y_test.values - model.predict(X_test)) <= 3).mean())
+    v_bmae, _ = _baseline(valid_df)
+
+    # --- Final, one-shot evaluation on the untouched TEST set. ---
+    test_pred = model.predict(X_test)
+    t_mmae, t_mrmse = _mae_rmse(y_test, test_pred)
+    t_bmae, t_brmse = _baseline(test_df)
+    tol = WITHIN_TOLERANCE.get(target, 3.0)
+    within = float((np.abs(y_test.values - test_pred) <= tol).mean())
 
     return EvalResult(
         target=target,
@@ -279,9 +309,11 @@ def evaluate_target(
         test_baseline_mae=round(t_bmae, 3),
         test_baseline_rmse=round(t_brmse, 3),
         test_mae_improvement_pct=round((t_bmae - t_mmae) / t_bmae * 100, 2),
-        test_within_3=round(within_3, 3),
-        valid_model_mae=round(v_mmae, 3),
+        within_threshold=tol,
+        test_within_threshold=round(within, 3),
+        valid_model_mae=round(best_valid_mae, 3),
         valid_baseline_mae=round(v_bmae, 3),
+        best_params=best_params,
     )
 
 

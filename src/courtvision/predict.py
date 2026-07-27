@@ -8,6 +8,7 @@ production. This mirrors real deployment: at tip-off we only know the past.
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass
 from datetime import date, datetime
 
@@ -16,6 +17,8 @@ from xgboost import XGBRegressor
 
 from .features import _team_clusters, load_stats
 from .train import MODEL_DIR
+
+logger = logging.getLogger(__name__)
 
 # ---- caches so repeated predictions don't reload/recompute -------------------
 _STATS: pd.DataFrame | None = None
@@ -112,9 +115,9 @@ def build_live_features(
         feat[f"{col}_last10"] = float(last10[col].mean()) if len(last10) else None
 
     m5 = feat.get("min_last5")
-    feat["pts_per_min_last5"] = (
-        round(feat["pts_last5"] / m5, 4) if m5 and feat.get("pts_last5") is not None else None
-    )
+    for stat in ("pts", "reb", "ast"):
+        v = feat.get(f"{stat}_last5")
+        feat[f"{stat}_per_min_last5"] = round(v / m5, 4) if m5 and v is not None else None
 
     feat["games_played_so_far"] = int(len(prior))
     feat["rest_days"] = (
@@ -125,12 +128,13 @@ def build_live_features(
     opp_id = abbr2id.get(opponent_abbr)
     feat["opp_def_rating"], feat["opp_def_rating_last10"] = _opp_defense(opp_id, on_ts)
 
-    # Player vs this exact opponent.
+    # Player vs this exact opponent (per target stat).
     vs = prior[prior["opponent_abbr"] == opponent_abbr]
-    feat["pts_vs_opp"] = float(vs["pts"].mean()) if len(vs) else None
+    for stat in ("pts", "reb", "ast"):
+        feat[f"{stat}_vs_opp"] = float(vs[stat].mean()) if len(vs) else None
     feat["games_vs_opp"] = int(len(vs))
 
-    # Player vs teams that play like this opponent (same cluster).
+    # Player vs teams that play like this opponent (same cluster), per stat.
     opp_cluster = _opponent_cluster(opp_id, season) if opp_id is not None else -1
     feat["opp_cluster"] = opp_cluster
     if len(prior):
@@ -140,12 +144,16 @@ def build_live_features(
             clusters.get((s, int(t)) if pd.notna(t) else None, -2)
             for s, t in zip(prior_seasons, prior_opp_ids)
         ]
-        mask = pd.Series(prior_clusters, index=prior.index) == opp_cluster
-        vs_clu = prior[mask.values]
-        feat["pts_vs_opp_cluster"] = float(vs_clu["pts"].mean()) if len(vs_clu) else None
+        mask = (pd.Series(prior_clusters, index=prior.index) == opp_cluster).values
+        vs_clu = prior[mask]
+        for stat in ("pts", "reb", "ast"):
+            feat[f"{stat}_vs_opp_cluster"] = (
+                float(vs_clu[stat].mean()) if len(vs_clu) else None
+            )
         feat["games_vs_opp_cluster"] = int(len(vs_clu))
     else:
-        feat["pts_vs_opp_cluster"] = None
+        for stat in ("pts", "reb", "ast"):
+            feat[f"{stat}_vs_opp_cluster"] = None
         feat["games_vs_opp_cluster"] = 0
 
     return feat
@@ -283,6 +291,9 @@ def predict_slate(on_date: date, target: str = "target_pts", top_n: int = 6) -> 
             for pid in roster_proxy(team_id, on_date, top_n):
                 try:
                     preds.append(predict_player(pid, opp_abbr, home, on_date, target))
-                except Exception:
-                    continue
+                except Exception as e:
+                    logger.warning(
+                        "Prediction failed for player %s vs %s on %s (%s): %s",
+                        pid, opp_abbr, on_date, target, e,
+                    )
     return preds

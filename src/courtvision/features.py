@@ -77,16 +77,25 @@ def _season_start_year(season: str) -> int:
 
 
 def _team_clusters(df: pd.DataFrame) -> dict[tuple[str, int], int]:
-    """Cluster teams by play style using the PREVIOUS season's team profile.
+    """Cluster teams by play style with NO future information and STABLE ids.
 
     Profile per (season, team): points for/allowed, 3-point rate, assists,
-    rebounds, turnovers and an estimated pace (possessions/game). To avoid any
-    style-leakage from the current season, a team's cluster for season S is
-    derived from its profile in season S-1 (fit KMeans on S-1, then the same
-    model labels teams for use in S). Returns {(season, team_id): cluster_id}.
+    rebounds, turnovers and an estimated pace (possessions/game).
 
-    The earliest season in the data has no prior season, so it falls back to
-    clustering on its own profile.
+    Two properties matter:
+
+    1. **No leakage.** A team's cluster for season S is determined by its
+       *previous* season's (S-1) profile only — never by any S games. So a
+       prediction for an October S game does not depend on that team's
+       January-April S statistics.
+    2. **Stable cluster meanings.** A single StandardScaler + KMeans is fit
+       once on the earliest (context) season and reused for every season.
+       Thus ``cluster_0`` denotes the same play-style archetype every year,
+       which is required because the model one-hot encodes the cluster id.
+
+    Returns {(season, team_id): cluster_id}. The earliest season has no prior
+    season and is context-only (never modeled), so it is labelled from its own
+    profile purely to seed the vs-cluster history of the first modeled season.
     """
     tg = df.groupby(["season", "game_id", "team_id"], as_index=False).agg(
         pts=("pts", "sum"), fga=("fga", "sum"), fg3a=("fg3a", "sum"),
@@ -110,22 +119,25 @@ def _team_clusters(df: pd.DataFrame) -> dict[tuple[str, int], int]:
     seasons = sorted(profile["season"].unique(), key=_season_start_year)
     start_year_to_season = {_season_start_year(s): s for s in seasons}
 
+    # Fit ONE reference model on the earliest season's profiles.
+    ref_grp = profile[profile["season"] == seasons[0]]
+    scaler = StandardScaler().fit(ref_grp[feats].values)
+    k = min(N_CLUSTERS, len(ref_grp))
+    km = KMeans(n_clusters=k, n_init=10, random_state=42)
+    km.fit(scaler.transform(ref_grp[feats].values))
+
+    def _labels_for(src_season: str) -> dict[int, int]:
+        grp = profile[profile["season"] == src_season]
+        labs = km.predict(scaler.transform(grp[feats].values))
+        return {int(t): int(l) for t, l in zip(grp["team_id"], labs)}
+
     mapping: dict[tuple[str, int], int] = {}
     for season in seasons:
         prev_season = start_year_to_season.get(_season_start_year(season) - 1)
-        # Fit on the previous season if available, else on the current season.
-        fit_season = prev_season if prev_season is not None else season
-        fit_grp = profile[profile["season"] == fit_season]
-        apply_grp = profile[profile["season"] == season]
-
-        scaler = StandardScaler().fit(fit_grp[feats].values)
-        k = min(N_CLUSTERS, len(fit_grp))
-        km = KMeans(n_clusters=k, n_init=10, random_state=42)
-        km.fit(scaler.transform(fit_grp[feats].values))
-
-        labels = km.predict(scaler.transform(apply_grp[feats].values))
-        for (_, row), lab in zip(apply_grp.iterrows(), labels):
-            mapping[(season, int(row["team_id"]))] = int(lab)
+        # Classify from the PREVIOUS season; earliest season uses itself.
+        src_season = prev_season if prev_season is not None else season
+        for team_id, lab in _labels_for(src_season).items():
+            mapping[(season, team_id)] = lab
     return mapping
 
 
@@ -163,9 +175,11 @@ def build_features(season: str | None = None) -> pd.DataFrame:
             .round(3)
         )
 
-    # Scoring efficiency: points per minute over the last 5 games.
+    # Per-minute efficiency over the last 5 games, for each target stat.
     min5 = out["min_last5"].where(out["min_last5"] > 0)
     out["pts_per_min_last5"] = (out["pts_last5"] / min5).round(4)
+    out["reb_per_min_last5"] = (out["reb_last5"] / min5).round(4)
+    out["ast_per_min_last5"] = (out["ast_last5"] / min5).round(4)
 
     out["rest_days"] = grp["game_date"].transform(lambda s: s.diff().dt.days)
     out["games_played_so_far"] = grp.cumcount()
@@ -196,26 +210,24 @@ def build_features(season: str | None = None) -> pd.DataFrame:
     ]
     out["opp_cluster"] = df["opp_cluster"].values
 
-    # Player-vs-opponent history: expanding mean points vs this exact team,
-    # prior meetings only (shift(1)). Kept in df's player/date sort order.
-    vs_opp = df.groupby(["player_id", "opponent_abbr"], sort=False)["pts"]
-    out["pts_vs_opp"] = vs_opp.transform(
-        lambda s: s.shift(1).expanding(min_periods=1).mean()
-    ).round(3)
-    out["games_vs_opp"] = df.groupby(
-        ["player_id", "opponent_abbr"], sort=False
-    ).cumcount()
+    # Player-vs-opponent history: expanding mean of each target stat vs this
+    # exact team, prior meetings only (shift(1)). Kept in df's player/date order.
+    opp_grp = df.groupby(["player_id", "opponent_abbr"], sort=False)
+    for stat in ("pts", "reb", "ast"):
+        out[f"{stat}_vs_opp"] = opp_grp[stat].transform(
+            lambda s: s.shift(1).expanding(min_periods=1).mean()
+        ).round(3)
+    out["games_vs_opp"] = opp_grp.cumcount()
 
-    # Player-vs-similar-team history: expanding mean points vs opponents that
-    # play like this opponent (same cluster), prior games only. Generalizes the
-    # head-to-head signal and reduces sparsity of exact matchups.
-    vs_clu = df.groupby(["player_id", "opp_cluster"], sort=False)["pts"]
-    out["pts_vs_opp_cluster"] = vs_clu.transform(
-        lambda s: s.shift(1).expanding(min_periods=1).mean()
-    ).round(3)
-    out["games_vs_opp_cluster"] = df.groupby(
-        ["player_id", "opp_cluster"], sort=False
-    ).cumcount()
+    # Player-vs-similar-team history: expanding mean of each target stat vs
+    # opponents that play like this opponent (same cluster), prior games only.
+    # Generalizes the head-to-head signal and reduces exact-matchup sparsity.
+    clu_grp = df.groupby(["player_id", "opp_cluster"], sort=False)
+    for stat in ("pts", "reb", "ast"):
+        out[f"{stat}_vs_opp_cluster"] = clu_grp[stat].transform(
+            lambda s: s.shift(1).expanding(min_periods=1).mean()
+        ).round(3)
+    out["games_vs_opp_cluster"] = clu_grp.cumcount()
 
     out["target_pts"] = df["pts"]
     out["target_reb"] = df["reb"]

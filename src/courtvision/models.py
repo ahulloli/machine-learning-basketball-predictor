@@ -129,20 +129,27 @@ class PlayerGameFeature(Base):
     reb_last10: Mapped[float | None] = mapped_column(Float, nullable=True)
     ast_last10: Mapped[float | None] = mapped_column(Float, nullable=True)
     min_last10: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # Per-minute efficiency (last 5) for each target stat
     pts_per_min_last5: Mapped[float | None] = mapped_column(Float, nullable=True)
+    reb_per_min_last5: Mapped[float | None] = mapped_column(Float, nullable=True)
+    ast_per_min_last5: Mapped[float | None] = mapped_column(Float, nullable=True)
 
     # Opponent defensive strength (points the opponent allows, prior games only)
     opp_def_rating: Mapped[float | None] = mapped_column(Float, nullable=True)
     opp_def_rating_last10: Mapped[float | None] = mapped_column(Float, nullable=True)
 
-    # Player-vs-opponent history (prior meetings only)
+    # Player-vs-opponent history (prior meetings only), per target stat
     pts_vs_opp: Mapped[float | None] = mapped_column(Float, nullable=True)
+    reb_vs_opp: Mapped[float | None] = mapped_column(Float, nullable=True)
+    ast_vs_opp: Mapped[float | None] = mapped_column(Float, nullable=True)
     games_vs_opp: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     # Team-playstyle similarity: opponent's cluster + player's history vs
-    # teams that play similarly (prior games only)
+    # teams that play similarly (prior games only), per target stat
     opp_cluster: Mapped[int | None] = mapped_column(Integer, nullable=True)
     pts_vs_opp_cluster: Mapped[float | None] = mapped_column(Float, nullable=True)
+    reb_vs_opp_cluster: Mapped[float | None] = mapped_column(Float, nullable=True)
+    ast_vs_opp_cluster: Mapped[float | None] = mapped_column(Float, nullable=True)
     games_vs_opp_cluster: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     # Supervised targets (current game actuals)
