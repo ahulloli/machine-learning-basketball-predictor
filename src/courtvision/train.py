@@ -54,6 +54,27 @@ class TrainResult:
     top_features: dict
 
 
+@dataclass
+class EvalResult:
+    target: str
+    test_season: str
+    n_train: int
+    n_valid: int
+    n_test: int
+    valid_split_date: str
+    test_split_date: str
+    # Metrics on the untouched TEST set
+    test_model_mae: float
+    test_model_rmse: float
+    test_baseline_mae: float
+    test_baseline_rmse: float
+    test_mae_improvement_pct: float
+    test_within_3: float
+    # For reference: validation metrics
+    valid_model_mae: float
+    valid_baseline_mae: float
+
+
 def load_features(season: str | None = None) -> pd.DataFrame:
     query = "SELECT * FROM player_game_features"
     params: dict = {}
@@ -93,6 +114,38 @@ def time_split(df: pd.DataFrame, valid_frac: float = 0.2) -> tuple[pd.DataFrame,
     train_df = df_sorted[df_sorted["game_date"] < split_date]
     valid_df = df_sorted[df_sorted["game_date"] >= split_date]
     return train_df, valid_df, split_date
+
+
+# Seasons used only to seed team play-style clusters, never trained/evaluated on.
+CONTEXT_SEASONS = ("2020-21",)
+
+
+def three_way_split(
+    df: pd.DataFrame,
+    test_season: str,
+    valid_frac_of_test_season: float = 0.5,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.Timestamp]:
+    """Chronological TRAIN / VALIDATION / TEST split.
+
+    * TRAIN      = every modeled season BEFORE ``test_season``.
+    * VALIDATION = first ``valid_frac_of_test_season`` of ``test_season``
+                   (used for early-stopping / model selection).
+    * TEST       = the remainder of ``test_season`` (untouched until the end).
+
+    Context seasons (used only to seed clusters) are excluded entirely.
+    """
+    df = df[~df["season"].isin(CONTEXT_SEASONS)].copy()
+
+    train_df = df[df["season"] < test_season]
+    season_df = df[df["season"] == test_season].sort_values("game_date").reset_index(drop=True)
+    if season_df.empty:
+        raise ValueError(f"No rows for test_season={test_season}")
+
+    cut = int(len(season_df) * valid_frac_of_test_season)
+    split_date = season_df.loc[cut, "game_date"]
+    valid_df = season_df[season_df["game_date"] < split_date]
+    test_df = season_df[season_df["game_date"] >= split_date]
+    return train_df, valid_df, test_df, split_date
 
 
 def train_target(
@@ -152,6 +205,84 @@ def train_target(
         top_features=top_features,
     )
     return model, feature_names, result
+
+
+def _xgb() -> XGBRegressor:
+    return XGBRegressor(
+        n_estimators=400,
+        max_depth=5,
+        learning_rate=0.05,
+        subsample=0.8,
+        colsample_bytree=0.8,
+        min_child_weight=5,
+        reg_lambda=1.0,
+        objective="reg:squarederror",
+        n_jobs=-1,
+        random_state=42,
+    )
+
+
+def _mae_rmse(y_true, y_pred) -> tuple[float, float]:
+    return (
+        float(mean_absolute_error(y_true, y_pred)),
+        float(np.sqrt(mean_squared_error(y_true, y_pred))),
+    )
+
+
+def evaluate_target(
+    df: pd.DataFrame,
+    target: str,
+    test_season: str,
+    baseline_col: str,
+) -> EvalResult:
+    """Train / validate / test with a strictly chronological split.
+
+    The TEST set (second half of ``test_season``) is never used for fitting or
+    model selection — it is scored exactly once, at the end, to give a credible
+    estimate of real-world performance.
+    """
+    df = df.dropna(subset=["pts_last5", target]).copy()
+    train_df, valid_df, test_df, valid_split = three_way_split(df, test_season)
+    test_split = test_df["game_date"].min()
+
+    X_train, y_train = prepare_xy(train_df, target)
+    X_valid, y_valid = prepare_xy(valid_df, target)
+    X_test, y_test = prepare_xy(test_df, target)
+    feature_names = list(X_train.columns)
+    X_valid = X_valid.reindex(columns=feature_names, fill_value=0)
+    X_test = X_test.reindex(columns=feature_names, fill_value=0)
+
+    model = _xgb()
+    # Validation set drives early stopping / model selection only.
+    model.fit(X_train, y_train, eval_set=[(X_valid, y_valid)], verbose=False)
+
+    def _metrics(frame, X, y):
+        m_mae, m_rmse = _mae_rmse(y, model.predict(X))
+        base = frame.dropna(subset=[baseline_col, target])
+        b_mae, b_rmse = _mae_rmse(base[target], base[baseline_col])
+        return m_mae, m_rmse, b_mae, b_rmse
+
+    v_mmae, _, v_bmae, _ = _metrics(valid_df, X_valid, y_valid)
+    t_mmae, t_mrmse, t_bmae, t_brmse = _metrics(test_df, X_test, y_test)
+    within_3 = float((np.abs(y_test.values - model.predict(X_test)) <= 3).mean())
+
+    return EvalResult(
+        target=target,
+        test_season=test_season,
+        n_train=len(X_train),
+        n_valid=len(X_valid),
+        n_test=len(X_test),
+        valid_split_date=str(valid_split.date()),
+        test_split_date=str(test_split.date()),
+        test_model_mae=round(t_mmae, 3),
+        test_model_rmse=round(t_mrmse, 3),
+        test_baseline_mae=round(t_bmae, 3),
+        test_baseline_rmse=round(t_brmse, 3),
+        test_mae_improvement_pct=round((t_bmae - t_mmae) / t_bmae * 100, 2),
+        test_within_3=round(within_3, 3),
+        valid_model_mae=round(v_mmae, 3),
+        valid_baseline_mae=round(v_bmae, 3),
+    )
 
 
 def save_model(model: XGBRegressor, feature_names: list[str], result: TrainResult) -> Path:
