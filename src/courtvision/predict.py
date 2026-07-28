@@ -17,6 +17,12 @@ from xgboost import XGBRegressor
 
 from .features import LONG_BREAK_DAYS, REST_CAP, _team_clusters, load_stats
 from .train import MODEL_DIR
+from .uncertainty import (
+    ResidualCalibrator,
+    load_calibrator,
+    prediction_interval,
+    probability_over,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -74,7 +80,16 @@ class Prediction:
     home: bool
     on_date: str
     target: str
+
     projection: float
+    interval_lower: float | None
+    interval_upper: float | None
+    interval_coverage: float | None
+
+    requested_line: float | None
+    probability_over: float | None
+    probability_under: float | None
+
     baseline_last5: float
     games_of_history: int
 
@@ -182,8 +197,23 @@ def _opp_defense(opp_team_id: int | None, on_ts: pd.Timestamp) -> tuple[float | 
     return round(float(allowed.mean()), 3), round(float(allowed.tail(10).mean()), 3)
 
 
-def _load_model(target: str) -> tuple[XGBRegressor, list[str]]:
+def _load_model(target: str) -> tuple[XGBRegressor, list[str], bool]:
+    """Load the point model for ``target``.
+
+    Prefer the probabilistic model (``*_prob.json``) whose residuals the saved
+    calibrator was fit on, so prediction intervals are internally consistent.
+    Fall back to the plain deployment model when no probabilistic artifact
+    exists (in which case intervals/probabilities are unavailable).
+    """
     tag = target.replace("target_", "")
+    prob_model_path = MODEL_DIR / f"xgb_{tag}_prob.json"
+    prob_meta_path = MODEL_DIR / f"xgb_{tag}_prob_meta.json"
+    if prob_model_path.exists():
+        model = XGBRegressor()
+        model.load_model(prob_model_path)
+        feature_names = json.loads(prob_meta_path.read_text())["feature_names"]
+        return model, feature_names, True
+
     model_path = MODEL_DIR / f"xgb_{tag}.json"
     meta_path = MODEL_DIR / f"xgb_{tag}_meta.json"
     if not model_path.exists():
@@ -193,7 +223,7 @@ def _load_model(target: str) -> tuple[XGBRegressor, list[str]]:
     model = XGBRegressor()
     model.load_model(model_path)
     feature_names = json.loads(meta_path.read_text())["feature_names"]
-    return model, feature_names
+    return model, feature_names, False
 
 
 def _resolve_player(name_or_id: str | int) -> tuple[int, str]:
@@ -216,10 +246,11 @@ def predict_player(
     home: bool,
     on_date: date | None = None,
     target: str = "target_pts",
+    line: float | None = None,
 ) -> Prediction:
     on_date = on_date or date.today()
     player_id, player_name = _resolve_player(name_or_id)
-    model, feature_names = _load_model(target)
+    model, feature_names, has_prob = _load_model(target)
 
     feat = build_live_features(player_id, opponent_abbr, home, on_date)
     row = pd.Series(feat)
@@ -234,6 +265,26 @@ def predict_player(
     X = X.apply(pd.to_numeric, errors="coerce")
 
     projection = float(model.predict(X)[0])
+
+    # Conformal prediction interval + empirical over/under probabilities.
+    # Only available when a probabilistic model/calibrator pair was trained.
+    lower = upper = coverage = None
+    over = under = None
+    if has_prob:
+        try:
+            calibrator: ResidualCalibrator = load_calibrator(target)
+            lower, upper = prediction_interval(projection, calibrator)
+            lower, upper = round(lower, 2), round(upper, 2)
+            coverage = calibrator.coverage
+            if line is not None:
+                over = probability_over(projection, line, calibrator)
+                under = 1.0 - over
+        except FileNotFoundError:
+            logger.warning(
+                "Probabilistic model loaded for %s but no calibrator found; "
+                "returning point projection only.", target,
+            )
+
     # Target-aware naive baseline (last-5 average of the SAME stat).
     base_col = f"{target.replace('target_', '')}_last5"
     base_val = feat.get(base_col)
@@ -245,6 +296,12 @@ def predict_player(
         on_date=str(on_date),
         target=target,
         projection=round(projection, 2),
+        interval_lower=lower,
+        interval_upper=upper,
+        interval_coverage=coverage,
+        requested_line=line,
+        probability_over=round(over, 4) if over is not None else None,
+        probability_under=round(under, 4) if under is not None else None,
         baseline_last5=round(base_val, 2) if base_val is not None else float("nan"),
         games_of_history=feat["games_played_so_far"],
     )

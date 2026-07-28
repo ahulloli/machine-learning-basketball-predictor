@@ -32,6 +32,7 @@ def main() -> None:
     ap.add_argument("--slate", action="store_true", help="Predict the whole schedule")
     ap.add_argument("--target", default="target_pts")
     ap.add_argument("--top", type=int, default=6, help="Players per team in slate mode")
+    ap.add_argument("--line", type=float, help="Over/under line for P(over) / P(under)")
     args = ap.parse_args()
 
     on_date = _parse_date(args.date)
@@ -43,24 +44,38 @@ def main() -> None:
             return
         preds.sort(key=lambda p: p.projection, reverse=True)
         print(f"\nCourtVision projections — {on_date}  ({args.target})")
-        print("-" * 60)
-        print(f"{'Player':22}{'OPP':>5}{'H/A':>5}{'proj':>8}{'last5':>8}")
+        print("-" * 72)
+        print(f"{'Player':22}{'OPP':>5}{'H/A':>5}{'proj':>8}{'last5':>8}{'80% interval':>18}")
         for p in preds:
+            interval = (
+                f"{p.interval_lower}–{p.interval_upper}"
+                if p.interval_lower is not None else "—"
+            )
             print(f"{p.player_name[:21]:22}{p.opponent_abbr:>5}"
-                  f"{'H' if p.home else 'A':>5}{p.projection:>8}{p.baseline_last5:>8}")
+                  f"{'H' if p.home else 'A':>5}{p.projection:>8}{p.baseline_last5:>8}"
+                  f"{interval:>18}")
         return
 
     if not args.player or not args.opp:
         ap.error("Provide --player and --opp (or use --slate).")
 
-    p = predict_player(args.player, args.opp.upper(), args.home, on_date, args.target)
+    p = predict_player(
+        args.player, args.opp.upper(), args.home, on_date, args.target, line=args.line
+    )
+    stat = p.target.replace("target_", "")
     ha = "HOME" if p.home else "AWAY"
     print("\n" + "=" * 50)
     print(f"  {p.player_name}  vs  {p.opponent_abbr}  ({ha})   {p.on_date}")
     print("-" * 50)
-    print(f"  Model projection ({p.target.replace('target_','')}): {p.projection}")
-    print(f"  Naive last-5 baseline:              {p.baseline_last5}")
-    print(f"  Games of history used:              {p.games_of_history}")
+    print(f"  Expected {stat}:{'':>10}{p.projection}")
+    if p.interval_lower is not None:
+        pct = f"{p.interval_coverage:.0%}"
+        print(f"  {pct} prediction interval:  {p.interval_lower} – {p.interval_upper}")
+    if p.requested_line is not None and p.probability_over is not None:
+        print(f"  P(over {p.requested_line}):{'':>13}{p.probability_over:.0%}")
+        print(f"  P(under {p.requested_line}):{'':>12}{p.probability_under:.0%}")
+    print(f"  Naive last-5 baseline:      {p.baseline_last5}")
+    print(f"  Games of history used:      {p.games_of_history}")
     print("=" * 50)
 
 

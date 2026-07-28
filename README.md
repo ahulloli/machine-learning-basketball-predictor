@@ -60,6 +60,32 @@ MAE is the headline metric. "Within" uses a target-specific tolerance
 
 Reproduce: `python scripts/evaluate.py`
 
+### Probabilistic forecasting (calibrated intervals)
+
+Beyond a single number, CourtVision reports an **80% prediction interval** and
+empirical **over/under probabilities** via split-conformal calibration. To keep
+uncertainty honest, hyperparameters are chosen on 2023-24, the point model is
+refit on 2021-24, residuals are calibrated on the unseen 2024-25 season, and the
+intervals are scored **exactly once** on 2025-26. Coverage near 80% means the
+intervals are trustworthy; narrower average width at the same coverage is better.
+
+| Target   | Test MAE | Requested | Actual coverage | Avg. width | Conformal radius |
+|----------|---------:|----------:|----------------:|-----------:|-----------------:|
+| Points   |    4.613 |       80% |           80.1% |     13.523 |          ±7.182 |
+| Rebounds |    1.918 |       80% |           80.1% |      5.615 |          ±2.960 |
+| Assists  |    1.372 |       80% |           79.8% |      3.706 |          ±2.075 |
+
+Over/under probability quality on 2025-26 (Brier score, lower is better):
+
+| Target   | Line | Brier | Line | Brier | Line | Brier |
+|----------|-----:|------:|-----:|------:|-----:|------:|
+| Points   | 14.5 | 0.131 | 19.5 | 0.088 | 24.5 | 0.052 |
+| Rebounds |  4.5 | 0.168 |  6.5 | 0.116 |  8.5 | 0.068 |
+| Assists  |  3.5 | 0.130 |  5.5 | 0.074 |  7.5 | 0.039 |
+
+Reproduce: `python scripts/train_probabilistic.py`. Live example:
+`python scripts/predict_today.py --player "Stephen Curry" --opp LAL --home --line 27.5`
+
 ## What's implemented
 
 - **Real data ingestion** — one `LeagueGameLog` call per season pulls every
@@ -74,6 +100,10 @@ Reproduce: `python scripts/evaluate.py`
   cluster ids mean the same play-style every year and no current-season info leaks.
 - **XGBoost models** for points / rebounds / assists, each compared against a
   naive last-5 baseline.
+- **Probabilistic forecasting** — split-conformal calibration on an unseen
+  season turns each point projection into an 80% prediction interval plus
+  empirical over/under probabilities, evaluated by coverage, width and Brier
+  score rather than assuming a normal distribution.
 - **Train / validation / test methodology** — split by full season
   (train=2021-24, validation=2024-25, test=2025-26); hyperparameters are
   chosen on validation and the untouched test set is scored once.
