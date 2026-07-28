@@ -63,28 +63,42 @@ Reproduce: `python scripts/evaluate.py`
 ### Probabilistic forecasting (calibrated intervals)
 
 Beyond a single number, CourtVision reports an **80% prediction interval** and
-empirical **over/under probabilities** via split-conformal calibration. To keep
-uncertainty honest, hyperparameters are chosen on 2023-24, the point model is
-refit on 2021-24, residuals are calibrated on the unseen 2024-25 season, and the
-intervals are scored **exactly once** on 2025-26. Coverage near 80% means the
-intervals are trustworthy; narrower average width at the same coverage is better.
+empirical **over/under probabilities** via split-conformal calibration. Because
+probabilities need calibration data the point model has never seen, 2024-25 is
+split in half: hyperparameters are chosen on the **first half**, the point model
+is refit on 2021-24 + that first half, and its errors on the **unseen second
+half** become the calibration residuals. The intervals are then scored **exactly
+once** on 2025-26. Coverage near 80% means the intervals are trustworthy;
+narrower average width at the same coverage is more informative.
 
-| Target   | Test MAE | Requested | Actual coverage | Avg. width | Conformal radius |
-|----------|---------:|----------:|----------------:|-----------:|-----------------:|
-| Points   |    4.613 |       80% |           80.1% |     13.523 |          ±7.182 |
-| Rebounds |    1.918 |       80% |           80.1% |      5.615 |          ±2.960 |
-| Assists  |    1.372 |       80% |           79.8% |      3.706 |          ±2.075 |
+| Target   | Point MAE | Requested | Actual coverage | Avg. width | Conformal radius |
+|----------|----------:|----------:|----------------:|-----------:|-----------------:|
+| Points   |     4.612 |       80% |           80.6% |      13.65 |          ±7.267 |
+| Rebounds |     1.908 |       80% |           81.4% |       5.73 |          ±3.039 |
+| Assists  |     1.353 |       80% |           80.0% |       3.65 |          ±2.061 |
+
+**Known limitation (motivates quantile regression next).** A single global radius
+per stat is too wide for low-minute bench players and too narrow for high-minute
+starters. Coverage by expected minutes (proxied by `min_last5`) on 2025-26:
+
+| Expected minutes | Points | Rebounds | Assists |
+|------------------|-------:|---------:|--------:|
+| <15 min          |  92.7% |    88.5% |   92.1% |
+| 15–25 min        |  82.9% |    82.1% |   83.9% |
+| 25–35 min        |  73.6% |    77.5% |   72.3% |
+| 35+ min          |  65.0% |    75.1% |   60.0% |
 
 Over/under probability quality on 2025-26 (Brier score, lower is better):
 
 | Target   | Line | Brier | Line | Brier | Line | Brier |
 |----------|-----:|------:|-----:|------:|-----:|------:|
-| Points   | 14.5 | 0.131 | 19.5 | 0.088 | 24.5 | 0.052 |
+| Points   | 14.5 | 0.132 | 19.5 | 0.088 | 24.5 | 0.052 |
 | Rebounds |  4.5 | 0.168 |  6.5 | 0.116 |  8.5 | 0.068 |
-| Assists  |  3.5 | 0.130 |  5.5 | 0.074 |  7.5 | 0.039 |
+| Assists  |  3.5 | 0.128 |  5.5 | 0.073 |  7.5 | 0.039 |
 
-Reproduce: `python scripts/train_probabilistic.py`. Live example:
-`python scripts/predict_today.py --player "Stephen Curry" --opp LAL --home --line 27.5`
+Reproduce: `python scripts/calibrate_uncertainty.py` then
+`python scripts/evaluate_uncertainty.py`. Live example:
+`python scripts/predict_today.py --player "Stephen Curry" --opp BOS --target target_pts --line 27.5`
 
 ## What's implemented
 

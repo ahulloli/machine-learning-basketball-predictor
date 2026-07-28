@@ -69,19 +69,20 @@ def conformal_radius(
 
 
 def fit_calibrator(
+    *,
     target: str,
     y_true: np.ndarray,
-    predictions: np.ndarray,
+    y_pred: np.ndarray,
     coverage: float = 0.80,
 ) -> ResidualCalibrator:
     """Build a calibrator from unseen calibration predictions."""
     y_true = np.asarray(y_true, dtype=float)
-    predictions = np.asarray(predictions, dtype=float)
+    y_pred = np.asarray(y_pred, dtype=float)
 
-    if y_true.shape != predictions.shape:
-        raise ValueError("y_true and predictions must have equal shapes")
+    if y_true.shape != y_pred.shape:
+        raise ValueError("y_true and y_pred must have the same shape")
 
-    signed_residuals = y_true - predictions
+    signed_residuals = y_true - y_pred
     radius = conformal_radius(signed_residuals, coverage)
 
     return ResidualCalibrator(
@@ -104,37 +105,44 @@ def prediction_interval(
 
 
 def probability_over(
-    projection: float,
+    *,
+    prediction: float,
     line: float,
     calibrator: ResidualCalibrator,
 ) -> float:
     """Estimate P(actual > line) from historical calibration errors.
 
     This asks: if today's model error resembles one of the calibration errors,
-    how often would ``projection + error`` exceed the requested line?
+    how often would ``prediction + error`` exceed the requested line?
     """
-    simulated_outcomes = projection + calibrator.residuals
-    successes = int(np.sum(simulated_outcomes > line))
-    n = len(simulated_outcomes)
+    possible_outcomes = prediction + calibrator.residuals
+    over_count = int(np.sum(possible_outcomes > line))
+    n = len(possible_outcomes)
 
-    # Laplace smoothing prevents exact 0% or 100% estimates.
-    return float((successes + 1) / (n + 2))
+    # Smoothing avoids claiming exactly 0% or 100%.
+    return float((over_count + 1) / (n + 2))
 
 
 def probability_under(
-    projection: float,
+    *,
+    prediction: float,
     line: float,
     calibrator: ResidualCalibrator,
 ) -> float:
-    return 1.0 - probability_over(projection, line, calibrator)
+    return 1.0 - probability_over(
+        prediction=prediction, line=line, calibrator=calibrator
+    )
+
+
+def _calibration_path(target: str) -> Path:
+    tag = target.replace("target_", "")
+    return MODEL_DIR / f"calibration_{tag}.npz"
 
 
 def save_calibrator(calibrator: ResidualCalibrator) -> Path:
     MODEL_DIR.mkdir(exist_ok=True)
 
-    tag = calibrator.target.replace("target_", "")
-    path = MODEL_DIR / f"xgb_{tag}_calibration.npz"
-
+    path = _calibration_path(calibrator.target)
     np.savez_compressed(
         path,
         target=np.array(calibrator.target),
@@ -147,13 +155,12 @@ def save_calibrator(calibrator: ResidualCalibrator) -> Path:
 
 
 def load_calibrator(target: str) -> ResidualCalibrator:
-    tag = target.replace("target_", "")
-    path = MODEL_DIR / f"xgb_{tag}_calibration.npz"
+    path = _calibration_path(target)
 
     if not path.exists():
         raise FileNotFoundError(
             f"No calibration artifact at {path}. "
-            "Run scripts/train_probabilistic.py first."
+            "Run scripts/calibrate_uncertainty.py first."
         )
 
     with np.load(path) as artifact:

@@ -67,15 +67,16 @@ def main() -> None:
     print("\n" + "=" * 50)
     print(f"  {p.player_name}  vs  {p.opponent_abbr}  ({ha})   {p.on_date}")
     print("-" * 50)
-    print(f"  Expected {stat}:{'':>10}{p.projection}")
+    print(f"  Projected {stat}:{'':>13}{p.projection}")
     if p.interval_lower is not None:
         pct = f"{p.interval_coverage:.0%}"
-        print(f"  {pct} prediction interval:  {p.interval_lower} – {p.interval_upper}")
-    if p.requested_line is not None and p.probability_over is not None:
-        print(f"  P(over {p.requested_line}):{'':>13}{p.probability_over:.0%}")
-        print(f"  P(under {p.requested_line}):{'':>12}{p.probability_under:.0%}")
-    print(f"  Naive last-5 baseline:      {p.baseline_last5}")
-    print(f"  Games of history used:      {p.games_of_history}")
+        print(f"  {pct} interval:{'':>15}{p.interval_lower}–{p.interval_upper}")
+    if p.line is not None and p.probability_over is not None:
+        print(f"  Requested line:{'':>14}{p.line}")
+        print(f"  Probability over:{'':>12}{p.probability_over:.1%}")
+        print(f"  Probability under:{'':>11}{p.probability_under:.1%}")
+    print(f"  Last-5 baseline:{'':>13}{p.baseline_last5}")
+    print(f"  Games of history:{'':>12}{p.games_of_history}")
     print("=" * 50)
 
 
