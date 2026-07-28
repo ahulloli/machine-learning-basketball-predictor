@@ -33,6 +33,10 @@ def main() -> None:
     ap.add_argument("--target", default="target_pts")
     ap.add_argument("--top", type=int, default=6, help="Players per team in slate mode")
     ap.add_argument("--line", type=float, help="Over/under line for P(over) / P(under)")
+    ap.add_argument(
+        "--expected-minutes", type=float, dest="expected_minutes",
+        help="Exogenous minutes estimate; adds an experimental minutes x rate projection",
+    )
     args = ap.parse_args()
 
     on_date = _parse_date(args.date)
@@ -60,7 +64,8 @@ def main() -> None:
         ap.error("Provide --player and --opp (or use --slate).")
 
     p = predict_player(
-        args.player, args.opp.upper(), args.home, on_date, args.target, line=args.line
+        args.player, args.opp.upper(), args.home, on_date, args.target,
+        line=args.line, expected_minutes=args.expected_minutes,
     )
     stat = p.target.replace("target_", "")
     ha = "HOME" if p.home else "AWAY"
@@ -71,6 +76,8 @@ def main() -> None:
     if p.interval_lower is not None:
         pct = f"{p.interval_coverage:.0%}"
         print(f"  {pct} interval:{'':>15}{p.interval_lower}–{p.interval_upper}")
+    if p.two_stage_projection is not None:
+        print(f"  [exp] {p.expected_minutes:g} min x rate:  {p.two_stage_projection}")
     if p.line is not None and p.probability_over is not None:
         print(f"  Requested line:{'':>14}{p.line}")
         print(f"  Probability over:{'':>12}{p.probability_over:.1%}")

@@ -100,6 +100,65 @@ Reproduce: `python scripts/calibrate_uncertainty.py` then
 `python scripts/evaluate_uncertainty.py`. Live example:
 `python scripts/predict_today.py --player "Stephen Curry" --opp BOS --target target_pts --line 27.5`
 
+### Two-stage minutes ablation (direct vs. minutes × rate)
+
+We tested whether decomposing a projection into **expected minutes × expected
+per-minute rate** (two-stage) beats the **direct** XGBoost model that predicts
+the stat in one shot. Walk-forward validation (3 rolling-origin folds, 2025-26
+never touched):
+
+| Model                | Points | Rebounds | Assists |
+|----------------------|-------:|---------:|--------:|
+| Last-five baseline   |  4.812 |    2.000 |   1.388 |
+| **Current XGBoost**  |  4.675 |    1.919 |   1.339 |
+| Minutes × rate       |  4.904 |    2.000 |   1.373 |
+| Blended (per-target) |  4.669 |    1.917 |   1.336 |
+
+**Verdict: keep the direct model as default.** The two-stage model is worse in
+2 of 3 stats (points +4.9%, assists +2.5%) and ties on rebounds. The optimal
+blend weights (w=0.9, 0.9, 0.8 for pts/reb/ast) heavily favor the direct model,
+and the blended MAE gain is negligible noise (≤0.003). The learned minutes
+model cannot capture exogenous information (injury returns, confirmed rotations,
+blowout risk) that a human can — so instead of auto-deploying two-stage, we ship
+an opt-in `--expected-minutes` lever (see below).
+
+Reproduce: `python scripts/ablation_minutes.py`
+
+### Opt-in `--expected-minutes` override
+
+When you have exogenous minutes knowledge (confirmed rotation, injury return,
+blowout risk), pass `--expected-minutes` to see an alternative **minutes ×
+per-minute-rate** projection alongside the default direct projection. The
+direct projection and its calibrated interval are always shown unchanged.
+
+```bash
+# Train rate models (one-time, after calibrate_uncertainty.py)
+python scripts/train_rate_models.py
+
+# Smoke test: Curry vs BOS, 34 expected minutes, 25.5 line
+python scripts/predict_today.py --player "Stephen Curry" --opp BOS --home \
+  --date 2025-03-15 --target target_pts --line 25.5 --expected-minutes 34
+```
+
+Output:
+```
+==================================================
+  Stephen Curry  vs  BOS  (HOME)   2025-03-15
+--------------------------------------------------
+  Projected pts:             25.84
+  80% interval:               18.57–33.10
+  [exp] 34 min x rate:  24.05
+  Requested line:              25.5
+  Probability over:            47.8%
+  Probability under:           52.2%
+  Last-5 baseline:             27.0
+  Games of history:            314
+==================================================
+```
+
+The `[exp]` line is the two-stage projection; everything else comes from the
+untouched direct model.
+
 ## What's implemented
 
 - **Real data ingestion** — one `LeagueGameLog` call per season pulls every
@@ -118,6 +177,13 @@ Reproduce: `python scripts/calibrate_uncertainty.py` then
   season turns each point projection into an 80% prediction interval plus
   empirical over/under probabilities, evaluated by coverage, width and Brier
   score rather than assuming a normal distribution.
+- **Two-stage minutes ablation** — walk-forward comparison of direct vs.
+  minutes × per-minute-rate vs. blended models. Verdict: direct wins; two-stage
+  kept as an opt-in `--expected-minutes` lever for when exogenous minutes
+  knowledge is available.
+- **Recency & volatility features** — last-3 averages, rolling std (5/10-game),
+  exponentially weighted means, and last-game minutes capture short-term form
+  and consistency alongside the existing last-5/last-10 rolling means.
 - **Train / validation / test methodology** — split by full season
   (train=2021-24, validation=2024-25, test=2025-26); hyperparameters are
   chosen on validation and the untouched test set is scored once.
@@ -202,10 +268,17 @@ src/courtvision/
 scripts/
   init_db.py  ingest_season.py  build_features.py
   train_model.py  evaluate.py  predict_today.py  monitor.py
+  calibrate_uncertainty.py  evaluate_uncertainty.py
+  ablation_minutes.py  train_rate_models.py
 ```
 
 ## Roadmap
-- Probabilistic forecasts (prediction intervals + P(over/under thresholds))
-- SHAP explanations per prediction
+- ~~Probabilistic forecasts (prediction intervals + P(over/under thresholds))~~
+- ~~Two-stage minutes model ablation~~ (verdict: direct wins; override shipped)
+- Conformalized quantile regression for heteroskedastic intervals (wider for
+  high-minute starters, narrower for bench players)
 - Real injury / confirmed-lineup feed (replace the minutes-based roster proxy)
+- Pace-adjusted defensive rating and role features
+- Expanded hyperparameter grid + early stopping with walk-forward model selection
+- SHAP explanations per prediction
 - FastAPI + dashboard, automated nightly retraining

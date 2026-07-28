@@ -19,6 +19,8 @@ ROLL_COLS = ["pts", "reb", "ast", "min", "fg3m", "fga", "stl", "blk", "tov"]
 WINDOW = 5
 LONG_WINDOW = 10
 LONG_COLS = ["pts", "reb", "ast", "min"]
+# Stats that get last-3 / rolling-std / EWM recency & volatility features.
+VOL_COLS = ["pts", "reb", "ast", "min"]
 N_CLUSTERS = 6
 REST_CAP = 7           # cap rest so an offseason gap != in-season rest
 LONG_BREAK_DAYS = 14   # gaps beyond this flag a season opener / long absence
@@ -181,6 +183,35 @@ def build_features(season: str | None = None) -> pd.DataFrame:
             .round(3)
         )
 
+    # Recency & volatility (previous games only). A last-5 average hides both
+    # direction and consistency: "28,29,27,30,28" and "12,41,17,44,28" share a
+    # mean but mean very different things. Add a short last-3 momentum window, a
+    # rolling standard deviation (volatility), and an exponentially weighted mean
+    # that up-weights the most recent games. Every stat is shifted by one game.
+    for col in VOL_COLS:
+        out[f"{col}_last3"] = (
+            grp[col]
+            .transform(lambda s: s.shift(1).rolling(3, min_periods=1).mean())
+            .round(3)
+        )
+        out[f"{col}_std5"] = (
+            grp[col]
+            .transform(lambda s: s.shift(1).rolling(WINDOW, min_periods=2).std())
+            .round(3)
+        )
+        out[f"{col}_std10"] = (
+            grp[col]
+            .transform(lambda s: s.shift(1).rolling(LONG_WINDOW, min_periods=2).std())
+            .round(3)
+        )
+        out[f"{col}_ewm5"] = (
+            grp[col]
+            .transform(lambda s: s.shift(1).ewm(span=5, adjust=False, min_periods=1).mean())
+            .round(3)
+        )
+    # Raw minutes in the immediately preceding game (a strong minutes anchor).
+    out["last_game_minutes"] = grp["min"].transform(lambda s: s.shift(1)).round(3)
+
     # Per-minute efficiency over the last 5 games, for each target stat.
     min5 = out["min_last5"].where(out["min_last5"] > 0)
     out["pts_per_min_last5"] = (out["pts_last5"] / min5).round(4)
@@ -244,6 +275,7 @@ def build_features(season: str | None = None) -> pd.DataFrame:
     out["target_pts"] = df["pts"]
     out["target_reb"] = df["reb"]
     out["target_ast"] = df["ast"]
+    out["target_min"] = df["min"]
     return out
 
 

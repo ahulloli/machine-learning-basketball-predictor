@@ -90,6 +90,12 @@ class Prediction:
     probability_over: float | None
     probability_under: float | None
 
+    # Opt-in manual-minutes override (experimental two-stage lever). Left None
+    # unless an exogenous minutes estimate is supplied; the default `projection`
+    # (and its calibrated interval) always comes from the untouched direct model.
+    expected_minutes: float | None
+    two_stage_projection: float | None
+
     baseline_last5: float
     games_of_history: int
 
@@ -212,6 +218,21 @@ def _load_model(target: str) -> tuple[XGBRegressor, list[str]]:
     return model, feature_names
 
 
+def _load_rate_model(target: str) -> tuple[XGBRegressor, list[str]]:
+    """Load the per-minute rate model for the manual-minutes override."""
+    tag = target.replace("target_", "")
+    model_path = MODEL_DIR / f"xgb_{tag}_rate.json"
+    meta_path = MODEL_DIR / f"xgb_{tag}_rate_meta.json"
+    if not model_path.exists():
+        raise FileNotFoundError(
+            f"No rate model at {model_path}. Run scripts/train_rate_models.py first."
+        )
+    model = XGBRegressor()
+    model.load_model(model_path)
+    feature_names = json.loads(meta_path.read_text())["feature_names"]
+    return model, feature_names
+
+
 def _resolve_player(name_or_id: str | int) -> tuple[int, str]:
     df = _stats()
     if isinstance(name_or_id, int) or str(name_or_id).isdigit():
@@ -233,6 +254,7 @@ def predict_player(
     on_date: date | None = None,
     target: str = "target_pts",
     line: float | None = None,
+    expected_minutes: float | None = None,
 ) -> Prediction:
     on_date = on_date or date.today()
     player_id, player_name = _resolve_player(name_or_id)
@@ -270,6 +292,24 @@ def predict_player(
             "Run scripts/calibrate_uncertainty.py.", target,
         )
 
+    # Opt-in manual-minutes override (experimental). If the caller supplies an
+    # exogenous minutes estimate, also report expected_minutes x per-minute rate.
+    # The default `projection` stays the untouched direct model, so its
+    # calibrated interval remains valid; the two-stage value is an alternative.
+    minutes_clip = two_stage = None
+    if expected_minutes is not None:
+        minutes_clip = float(min(max(expected_minutes, 0.0), 48.0))
+        try:
+            rate_model, rate_features = _load_rate_model(target)
+            Xr = X.reindex(columns=rate_features, fill_value=0)
+            rate = max(0.0, float(rate_model.predict(Xr)[0]))
+            two_stage = round(minutes_clip * rate, 2)
+        except FileNotFoundError:
+            logger.warning(
+                "No rate model for %s; ignoring --expected-minutes. "
+                "Run scripts/train_rate_models.py.", target,
+            )
+
     # Target-aware naive baseline (last-5 average of the SAME stat).
     base_col = f"{target.replace('target_', '')}_last5"
     base_val = feat.get(base_col)
@@ -287,6 +327,8 @@ def predict_player(
         line=line,
         probability_over=round(over, 4) if over is not None else None,
         probability_under=round(under, 4) if under is not None else None,
+        expected_minutes=minutes_clip,
+        two_stage_projection=two_stage,
         baseline_last5=round(base_val, 2) if base_val is not None else float("nan"),
         games_of_history=feat["games_played_so_far"],
     )

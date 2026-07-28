@@ -135,6 +135,26 @@ class PlayerGameFeature(Base):
     reb_per_min_last5: Mapped[float | None] = mapped_column(Float, nullable=True)
     ast_per_min_last5: Mapped[float | None] = mapped_column(Float, nullable=True)
 
+    # Recency & volatility (prior games only): last-3 momentum, rolling std
+    # (5- and 10-game), and an exponentially weighted mean per stat.
+    pts_last3: Mapped[float | None] = mapped_column(Float, nullable=True)
+    reb_last3: Mapped[float | None] = mapped_column(Float, nullable=True)
+    ast_last3: Mapped[float | None] = mapped_column(Float, nullable=True)
+    min_last3: Mapped[float | None] = mapped_column(Float, nullable=True)
+    pts_std5: Mapped[float | None] = mapped_column(Float, nullable=True)
+    reb_std5: Mapped[float | None] = mapped_column(Float, nullable=True)
+    ast_std5: Mapped[float | None] = mapped_column(Float, nullable=True)
+    min_std5: Mapped[float | None] = mapped_column(Float, nullable=True)
+    pts_std10: Mapped[float | None] = mapped_column(Float, nullable=True)
+    reb_std10: Mapped[float | None] = mapped_column(Float, nullable=True)
+    ast_std10: Mapped[float | None] = mapped_column(Float, nullable=True)
+    min_std10: Mapped[float | None] = mapped_column(Float, nullable=True)
+    pts_ewm5: Mapped[float | None] = mapped_column(Float, nullable=True)
+    reb_ewm5: Mapped[float | None] = mapped_column(Float, nullable=True)
+    ast_ewm5: Mapped[float | None] = mapped_column(Float, nullable=True)
+    min_ewm5: Mapped[float | None] = mapped_column(Float, nullable=True)
+    last_game_minutes: Mapped[float | None] = mapped_column(Float, nullable=True)
+
     # Opponent defense proxy (points the opponent allows per game, prior games
     # only). Raw points allowed, not possession-adjusted — hence the honest name.
     opp_pts_allowed: Mapped[float | None] = mapped_column(Float, nullable=True)
